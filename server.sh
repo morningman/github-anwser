@@ -20,7 +20,7 @@ case "$1" in
         fi
         echo "Starting GitHub Issue Manager on port $PORT..."
         cd "$SCRIPT_DIR"
-        nohup python3 server.py >> "$LOG_FILE" 2>&1 &
+        PORT=$PORT nohup python3 server.py >> "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
         sleep 1
         if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then

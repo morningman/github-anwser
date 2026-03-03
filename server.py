@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PORT = 8080
+PORT = int(os.environ.get('PORT', 8080))
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 CONFIG_FILE = os.path.join(DATA_DIR, 'config.json')
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -292,10 +292,16 @@ class APIHandler(SimpleHTTPRequestHandler):
 
     def _handle_save_settings(self, body):
         cfg = load_config()
+        # Sensitive fields: skip if value still contains mask placeholder
+        sensitive_keys = {'github_token', 'ai_api_key'}
         for key in ['github_token', 'repos', 'current_repo', 'github_username',
                      'ai_api_key', 'ai_base_url', 'ai_model']:
             if key in body:
-                cfg[key] = body[key]
+                value = body[key]
+                # Don't overwrite real secrets with masked values
+                if key in sensitive_keys and isinstance(value, str) and '****' in value:
+                    continue
+                cfg[key] = value
         save_config(cfg)
         logger.info('Settings saved')
         self._json_response({'ok': True, 'settings': masked_config(cfg)})
