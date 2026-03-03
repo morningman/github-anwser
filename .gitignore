@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/config.json
+data/starred.json
 logs/
 *.pid
 .DS_Store
