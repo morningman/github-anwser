@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/config.json
+logs/
+*.pid
+.DS_Store
+__pycache__/
+.vite/
