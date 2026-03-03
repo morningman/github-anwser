@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 PORT = int(os.environ.get('PORT', 8080))
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 CONFIG_FILE = os.path.join(DATA_DIR, 'config.json')
+STARRED_FILE = os.path.join(DATA_DIR, 'starred.json')
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
 # Ensure directories exist
@@ -81,6 +82,23 @@ def masked_config(cfg):
         t = c['ai_api_key']
         c['ai_api_key'] = t[:4] + '****' + t[-4:] if len(t) > 8 else '****'
     return c
+
+
+def load_starred():
+    """Load starred issues per repo from local JSON file."""
+    if os.path.exists(STARRED_FILE):
+        try:
+            with open(STARRED_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_starred(data):
+    """Save starred issues per repo to local JSON file."""
+    with open(STARRED_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +206,7 @@ Based on the following GitHub Issue, generate a professional, friendly reply.
         'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
         'temperature': 0.7,
-        'max_tokens': 1024,
+        'max_tokens': 4096,
     }
 
     data = json.dumps(payload).encode('utf-8')
@@ -196,7 +214,149 @@ Based on the following GitHub Issue, generate a professional, friendly reply.
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-            reply = result['choices'][0]['message']['content']
+            msg = result['choices'][0]['message']
+            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            if not reply:
+                return None, 'AI returned empty response'
+            return reply, None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8') if e.fp else ''
+        logger.error(f'AI API error: {e.code} {err_body[:200]}')
+        return None, f'AI API error: {e.code}'
+    except Exception as e:
+        logger.error(f'AI API exception: {e}')
+        return None, str(e)
+
+
+def ai_generate_summary(issue_title, issue_body, labels, comments):
+    """Call LLM API to generate a Chinese summary of the issue."""
+    cfg = load_config()
+    api_key = cfg.get('ai_api_key', '')
+    base_url = cfg.get('ai_base_url', 'https://api.openai.com/v1').rstrip('/')
+    model = cfg.get('ai_model', 'gpt-4o')
+
+    if not api_key:
+        return None, 'AI API Key not configured'
+
+    comments_text = ''
+    for c in (comments or [])[-5:]:
+        comments_text += f"**{c.get('user', {}).get('login', 'unknown')}**: {c.get('body', '')}\n\n"
+
+    labels_text = ', '.join(labels) if labels else 'None'
+
+    prompt = f"""你是一个开源项目维护者的助手。请根据以下 GitHub Issue 信息，生成结构化的中文分析。
+
+## Issue 信息
+- 标题: {issue_title}
+- 正文:
+{issue_body or '(空)'}
+- 标签: {labels_text}
+
+## 最近评论
+{comments_text or '(暂无评论)'}
+
+## 要求
+请严格按照以下三个部分输出，每个部分用对应的标题开头：
+
+### 📋 Issue 摘要
+用 2-3 句话简要概括这个 Issue 主要在说什么，核心诉求和关键信息。
+
+### 🏷️ Issue 分类
+明确指出 Issue 的类型，只能是以下之一：Bug 报告 / 功能请求 / 开发贡献 / 使用咨询 / 其他。并用一句话解释分类的原因。
+
+### 💡 回复建议
+给出 2-3 条具体可操作的回复建议，帮助维护者决定如何回应这个 Issue。
+
+注意：使用中文返回，使用 Markdown 格式。"""
+
+    url = f'{base_url}/chat/completions'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    }
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'temperature': 0.5,
+        'max_tokens': 4096,
+    }
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+            msg = result['choices'][0]['message']
+            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            if not reply:
+                return None, 'AI returned empty response'
+            return reply, None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8') if e.fp else ''
+        logger.error(f'AI API error: {e.code} {err_body[:200]}')
+        return None, f'AI API error: {e.code}'
+    except Exception as e:
+        logger.error(f'AI API exception: {e}')
+        return None, str(e)
+
+
+def ai_chat(messages, issue_title, issue_body, labels, comments):
+    """Call LLM API for multi-turn conversation with issue context."""
+    cfg = load_config()
+    api_key = cfg.get('ai_api_key', '')
+    base_url = cfg.get('ai_base_url', 'https://api.openai.com/v1').rstrip('/')
+    model = cfg.get('ai_model', 'gpt-4o')
+
+    if not api_key:
+        return None, 'AI API Key not configured'
+
+    comments_text = ''
+    for c in (comments or [])[-5:]:
+        comments_text += f"**{c.get('user', {}).get('login', 'unknown')}**: {c.get('body', '')}\n\n"
+
+    labels_text = ', '.join(labels) if labels else 'None'
+
+    system_prompt = f"""你是一个开源项目维护者的助手。你正在帮助维护者分析和回复一个 GitHub Issue。
+
+## 当前 Issue 上下文
+- 标题: {issue_title}
+- 正文:
+{issue_body or '(空)'}
+- 标签: {labels_text}
+
+## 最近评论
+{comments_text or '(暂无评论)'}
+
+## 你的角色
+- 你可以回答关于这个 Issue 的任何问题
+- 你可以帮助分析 Issue 的技术细节
+- 你可以提供回复建议
+- 使用中文回答用户的问题
+- 使用 Markdown 格式"""
+
+    full_messages = [{'role': 'system', 'content': system_prompt}] + messages
+
+    url = f'{base_url}/chat/completions'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    }
+    payload = {
+        'model': model,
+        'messages': full_messages,
+        'temperature': 0.7,
+        'max_tokens': 4096,
+    }
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+            msg = result['choices'][0]['message']
+            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            if not reply:
+                return None, 'AI returned empty response'
             return reply, None
     except urllib.error.HTTPError as e:
         err_body = e.read().decode('utf-8') if e.fp else ''
@@ -245,6 +405,10 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._handle_get_my_issues(query)
         elif path == '/api/stats':
             self._handle_get_stats()
+        elif path == '/api/dashboard-issues':
+            self._handle_get_dashboard_issues(query)
+        elif path == '/api/starred':
+            self._handle_get_starred()
         else:
             # Serve static files
             super().do_GET()
@@ -261,9 +425,15 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._handle_test_ai(body)
         elif path == '/api/ai/generate-reply':
             self._handle_ai_generate(body)
+        elif path == '/api/ai/summarize':
+            self._handle_ai_summarize(body)
+        elif path == '/api/ai/chat':
+            self._handle_ai_chat(body)
         elif re.match(r'^/api/issues/(\d+)/comments$', path):
             num = re.match(r'^/api/issues/(\d+)/comments$', path).group(1)
             self._handle_post_comment(num, body)
+        elif path == '/api/starred':
+            self._handle_star_issue(body)
         else:
             self._json_response({'error': 'Not found'}, 404)
 
@@ -277,11 +447,20 @@ class APIHandler(SimpleHTTPRequestHandler):
         else:
             self._json_response({'error': 'Not found'}, 404)
 
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path).path
+        body = self._read_body()
+
+        if path == '/api/starred':
+            self._handle_unstar_issue(body)
+        else:
+            self._json_response({'error': 'Not found'}, 404)
+
     def do_OPTIONS(self):
         """Handle CORS preflight."""
         self.send_response(204)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
@@ -382,27 +561,29 @@ class APIHandler(SimpleHTTPRequestHandler):
             else:
                 self._json_response(result, status)
         else:
-            # Use issues API
-            params = {
-                'state': state,
-                'sort': sort,
-                'direction': direction,
+            # Use search API with is:issue to exclude PRs
+            search_q = f'repo:{repo} is:issue'
+            if state != 'all':
+                search_q += f' is:{state}'
+            if labels:
+                for label in labels.split(','):
+                    search_q += f' label:"{label.strip()}"'
+            if since:
+                search_q += f' updated:>={since}'
+
+            sort_field = sort if sort in ('updated', 'created', 'comments') else 'updated'
+            params = urllib.parse.urlencode({
+                'q': search_q,
+                'sort': sort_field,
+                'order': direction,
                 'page': page,
                 'per_page': per_page,
-            }
-            if since:
-                params['since'] = since
-            if labels:
-                params['labels'] = labels
-
-            qs = urllib.parse.urlencode(params)
-            owner, name = repo.split('/')
-            result, status, link = github_request(f'/repos/{owner}/{name}/issues?{qs}')
+            })
+            result, status, link = github_request(f'/search/issues?{params}')
             if status == 200:
-                # Filter out pull requests (GitHub API returns PRs in issues)
-                issues = [i for i in result if 'pull_request' not in i]
                 self._json_response({
-                    'items': issues,
+                    'items': result.get('items', []),
+                    'total_count': result.get('total_count', 0),
                     'pagination': parse_link_header(link),
                 })
             else:
@@ -512,6 +693,101 @@ class APIHandler(SimpleHTTPRequestHandler):
             'unanswered_count': unanswered_count,
         })
 
+    # --- Dashboard Issues (Recent Active) -----------------------------------
+    def _handle_get_dashboard_issues(self, query=None):
+        """Fetch issues updated in the last N days (excluding stale), sorted by update time."""
+        from datetime import timedelta
+        cfg = load_config()
+        repo = cfg.get('current_repo', 'apache/doris')
+
+        # Support 'days' query param, default to 7
+        days = 7
+        if query and 'days' in query:
+            try:
+                days = int(query['days'][0])
+            except (ValueError, IndexError):
+                pass
+
+        logger.info(f'Dashboard: fetching issues updated in last {days} days for {repo}')
+        since_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        q = f'repo:{repo} is:issue is:open -label:stale updated:>={since_date}'
+        params = urllib.parse.urlencode({'q': q, 'sort': 'updated', 'order': 'desc', 'per_page': '30'})
+        result, status, _ = github_request(f'/search/issues?{params}')
+
+        if status != 200:
+            self._json_response({'error': 'Failed to fetch issues from GitHub'}, 500)
+            return
+
+        items = [i for i in result.get('items', []) if 'pull_request' not in i][:20]
+
+        # Get starred list
+        starred = load_starred()
+        starred_numbers = starred.get(repo, [])
+
+        self._json_response({
+            'items': items,
+            'starred': starred_numbers,
+            'total_count': len(items),
+        })
+
+
+    # --- Starred Issues (local storage) -------------------------------------
+    def _handle_get_starred(self):
+        """Return starred issues for the current repo with full issue data."""
+        cfg = load_config()
+        repo = cfg.get('current_repo', 'apache/doris')
+        owner, name = repo.split('/')
+        starred = load_starred()
+        starred_numbers = starred.get(repo, [])
+
+        if not starred_numbers:
+            self._json_response({'items': [], 'starred': []})
+            return
+
+        # Fetch each starred issue (in parallel would be nice, but keep it simple)
+        items = []
+        for num in starred_numbers:
+            issue, status, _ = github_request(f'/repos/{owner}/{name}/issues/{num}')
+            if status == 200 and 'pull_request' not in issue:
+                items.append(issue)
+
+        self._json_response({'items': items, 'starred': starred_numbers})
+
+    def _handle_star_issue(self, body):
+        """Add an issue number to the starred list."""
+        cfg = load_config()
+        repo = cfg.get('current_repo', 'apache/doris')
+        number = body.get('number')
+        if not number:
+            self._json_response({'error': 'Issue number required'}, 400)
+            return
+
+        starred = load_starred()
+        repo_starred = starred.setdefault(repo, [])
+        if number not in repo_starred:
+            repo_starred.insert(0, number)  # Add to front
+        save_starred(starred)
+        logger.info(f'Starred issue #{number} in {repo}')
+        self._json_response({'ok': True, 'starred': repo_starred})
+
+    def _handle_unstar_issue(self, body):
+        """Remove an issue number from the starred list."""
+        cfg = load_config()
+        repo = cfg.get('current_repo', 'apache/doris')
+        number = body.get('number')
+        if not number:
+            self._json_response({'error': 'Issue number required'}, 400)
+            return
+
+        starred = load_starred()
+        repo_starred = starred.get(repo, [])
+        if number in repo_starred:
+            repo_starred.remove(number)
+        starred[repo] = repo_starred
+        save_starred(starred)
+        logger.info(f'Unstarred issue #{number} in {repo}')
+        self._json_response({'ok': True, 'starred': repo_starred})
+
     # --- AI -----------------------------------------------------------------
     def _handle_ai_generate(self, body):
         title = body.get('title', '')
@@ -520,6 +796,31 @@ class APIHandler(SimpleHTTPRequestHandler):
         comments = body.get('comments', [])
 
         reply, error = ai_generate_reply(title, issue_body, labels, comments)
+        if reply:
+            self._json_response({'ok': True, 'reply': reply})
+        else:
+            self._json_response({'ok': False, 'message': error}, 500)
+
+    def _handle_ai_summarize(self, body):
+        title = body.get('title', '')
+        issue_body = body.get('body', '')
+        labels = body.get('labels', [])
+        comments = body.get('comments', [])
+
+        reply, error = ai_generate_summary(title, issue_body, labels, comments)
+        if reply:
+            self._json_response({'ok': True, 'summary': reply})
+        else:
+            self._json_response({'ok': False, 'message': error}, 500)
+
+    def _handle_ai_chat(self, body):
+        messages = body.get('messages', [])
+        title = body.get('title', '')
+        issue_body = body.get('body', '')
+        labels = body.get('labels', [])
+        comments = body.get('comments', [])
+
+        reply, error = ai_chat(messages, title, issue_body, labels, comments)
         if reply:
             self._json_response({'ok': True, 'reply': reply})
         else:

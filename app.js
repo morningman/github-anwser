@@ -4,6 +4,54 @@
  */
 
 // ============================================================================
+// Theme Manager
+// ============================================================================
+const ThemeManager = {
+    _key: 'theme',
+    init() {
+        const saved = localStorage.getItem(this._key);
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const theme = saved || (prefersDark ? 'dark' : 'light');
+        this._apply(theme);
+        // Listen for system theme changes when no explicit preference
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+            if (!localStorage.getItem(this._key)) {
+                this._apply(e.matches ? 'dark' : 'light');
+            }
+        });
+        // Bind toggle button
+        document.getElementById('themeToggle')?.addEventListener('click', () => this.toggle());
+    },
+    toggle() {
+        const current = document.documentElement.getAttribute('data-theme') || 'dark';
+        const next = current === 'dark' ? 'light' : 'dark';
+        // Add transition class for smooth animation
+        document.documentElement.classList.add('theme-transitioning');
+        this._apply(next);
+        localStorage.setItem(this._key, next);
+        // Remove transition class after animation completes
+        setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 500);
+    },
+    _apply(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        // Update icons
+        const sunIcon = document.getElementById('themeIconSun');
+        const moonIcon = document.getElementById('themeIconMoon');
+        if (sunIcon && moonIcon) {
+            sunIcon.style.display = theme === 'dark' ? '' : 'none';
+            moonIcon.style.display = theme === 'light' ? '' : 'none';
+        }
+    }
+};
+
+// Apply theme ASAP (before DOMContentLoaded) to avoid flash
+(function () {
+    const saved = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
+})();
+
+// ============================================================================
 // API Client
 // ============================================================================
 const API = {
@@ -34,8 +82,14 @@ const API = {
     getMyIssues: (params) => API.request(`/api/my-issues?${new URLSearchParams(params)}`),
     getStats: () => API.request('/api/stats'),
     aiGenerate: (b) => API.request('/api/ai/generate-reply', { method: 'POST', body: b }),
+    aiSummarize: (b) => API.request('/api/ai/summarize', { method: 'POST', body: b }),
+    aiChat: (b) => API.request('/api/ai/chat', { method: 'POST', body: b }),
     postComment: (num, body) => API.request(`/api/issues/${num}/comments`, { method: 'POST', body: { body } }),
     patchIssue: (num, b) => API.request(`/api/issues/${num}`, { method: 'PATCH', body: b }),
+    getDashboardIssues: (days) => API.request(`/api/dashboard-issues?days=${days || 7}`),
+    getStarred: () => API.request('/api/starred'),
+    starIssue: (num) => API.request('/api/starred', { method: 'POST', body: { number: num } }),
+    unstarIssue: (num) => API.request('/api/starred', { method: 'DELETE', body: { number: num } }),
 };
 
 // ============================================================================
@@ -198,56 +252,24 @@ function showLoading() {
 // ============================================================================
 // Dashboard Page
 // ============================================================================
+let dashboardState = {
+    tab: 'top',          // 'top' or 'starred'
+    days: 3,             // 3 or 7 — time range for top issues
+    topIssues: [],
+    starredIssues: [],
+    starredNumbers: [],
+    dismissed: new Set(), // session-only dismissed issue numbers
+    summaries: {},        // number -> summary text
+};
+
 async function renderDashboard() {
     showLoading();
     try {
-        const stats = await API.getStats();
-        let html = `
-            <div class="page-header">
-                <h1 class="page-title">Dashboard</h1>
-                <p class="page-subtitle">Overview of ${escapeHtml(State.currentRepo)}</p>
-            </div>
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-value">${stats.open_count || 0}</div>
-                    <div class="stat-label">Open Issues</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${stats.unanswered_count || 0}</div>
-                    <div class="stat-label">Unanswered Issues</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${(stats.recent_issues || []).length}</div>
-                    <div class="stat-label">Updated This Week</div>
-                </div>
-            </div>`;
+        const data = await API.getDashboardIssues(dashboardState.days);
+        dashboardState.topIssues = data.items || [];
+        dashboardState.starredNumbers = data.starred || [];
 
-        // Unanswered issues
-        if (stats.unanswered_issues && stats.unanswered_issues.length > 0) {
-            html += `<div class="card" style="margin-bottom:var(--space-6)">
-                <div class="card-header">
-                    <h2 class="card-title">⚡ Unanswered Issues</h2>
-                </div>
-                <div class="issue-list">
-                    ${stats.unanswered_issues.map(renderIssueCard).join('')}
-                </div>
-            </div>`;
-        }
-
-        // Recent issues
-        if (stats.recent_issues && stats.recent_issues.length > 0) {
-            html += `<div class="card">
-                <div class="card-header">
-                    <h2 class="card-title">🕐 Recently Updated</h2>
-                </div>
-                <div class="issue-list">
-                    ${stats.recent_issues.map(renderIssueCard).join('')}
-                </div>
-            </div>`;
-        }
-
-        setContent(html);
-        bindIssueCardClicks();
+        renderDashboardContent();
     } catch (err) {
         setContent(`<div class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -255,6 +277,294 @@ async function renderDashboard() {
             <a href="#settings" class="btn btn-primary">Go to Settings</a>
         </div>`);
     }
+}
+
+function renderDashboardContent() {
+    const topCount = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number)).length;
+    const starredCount = dashboardState.starredNumbers.length;
+
+    let html = `
+        <div class="page-header">
+            <h1 class="page-title">Dashboard</h1>
+            <p class="page-subtitle">High-value issue triage for ${escapeHtml(State.currentRepo)}</p>
+        </div>
+
+        <div class="dashboard-stats-bar">
+            <div class="dash-stat"><span class="dash-stat-value">${topCount}</span><span class="dash-stat-label">Top Issues</span></div>
+            <div class="dash-stat"><span class="dash-stat-value">${starredCount}</span><span class="dash-stat-label">Starred</span></div>
+        </div>
+
+        <div class="dashboard-toolbar">
+            <div class="dashboard-tabs">
+                <button class="dashboard-tab ${dashboardState.tab === 'top' ? 'active' : ''}" onclick="switchDashboardTab('top')">
+                    🔥 Top Issues
+                </button>
+                <button class="dashboard-tab ${dashboardState.tab === 'starred' ? 'active' : ''}" onclick="switchDashboardTab('starred')">
+                    ⭐ Starred <span class="tab-count">${starredCount}</span>
+                </button>
+            </div>
+            <div class="dashboard-actions">
+                ${dashboardState.tab === 'top' ? `
+                    <div class="days-toggle">
+                        <button class="days-toggle-btn ${dashboardState.days === 3 ? 'active' : ''}" onclick="switchDashboardDays(3)">3 天</button>
+                        <button class="days-toggle-btn ${dashboardState.days === 7 ? 'active' : ''}" onclick="switchDashboardDays(7)">7 天</button>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" id="batchSummaryBtn" onclick="batchAISummary()">
+                        🤖 Batch Summary
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="refreshDashboard()">
+                        🔄 Refresh
+                    </button>
+                ` : ''}
+            </div>
+        </div>`;
+
+    if (dashboardState.tab === 'top') {
+        const issues = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number));
+        if (issues.length === 0) {
+            html += `<div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48"><circle cx="12" cy="12" r="10"/><path d="M8 15h8M9 9h.01M15 9h.01"/></svg>
+                <p>No high-value issues found right now</p>
+            </div>`;
+        } else {
+            html += `<div class="issue-list">${issues.map(i => renderDashboardIssueCard(i)).join('')}</div>`;
+        }
+    } else {
+        // Starred tab
+        if (dashboardState.starredIssues.length > 0) {
+            html += `<div class="issue-list">${dashboardState.starredIssues.map(i => renderDashboardIssueCard(i, true)).join('')}</div>`;
+        } else if (starredCount > 0) {
+            html += `<div class="loading"><div class="spinner"></div><span>Loading starred issues...</span></div>`;
+        } else {
+            html += `<div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                <p>No starred issues yet. Star issues from the Top Issues tab!</p>
+            </div>`;
+        }
+    }
+
+    setContent(html);
+    bindIssueCardClicks();
+
+    // If on starred tab and we need to fetch starred issue details
+    if (dashboardState.tab === 'starred' && starredCount > 0 && dashboardState.starredIssues.length === 0) {
+        loadStarredIssues();
+    }
+}
+
+function renderDashboardIssueCard(issue, isStarredTab = false) {
+    const labels = (issue.labels || []).map(l =>
+        `<span class="label-badge" style="${labelStyle(l.color)}">${escapeHtml(l.name)}</span>`
+    ).join('');
+    const user = issue.user || {};
+    const commentsCount = issue.comments || 0;
+    const isStarred = dashboardState.starredNumbers.includes(issue.number);
+    const summary = dashboardState.summaries[issue.number];
+
+    return `
+        <div class="issue-card dashboard-issue-card" data-issue-number="${issue.number}">
+            <div class="issue-card-left">
+                ${issueStatusIcon(issue.state)}
+                <div class="issue-card-body">
+                    <div class="issue-card-title">
+                        <span>${escapeHtml(issue.title)}</span>
+                        <span class="issue-number">#${issue.number}</span>
+                    </div>
+                    <div class="issue-card-meta">
+                        <span class="author">
+                            <img src="${user.avatar_url || ''}" alt="" loading="lazy">
+                            ${escapeHtml(user.login || 'unknown')}
+                        </span>
+                        <span>updated ${timeAgo(issue.updated_at)}</span>
+                        <span>opened ${timeAgo(issue.created_at)}</span>
+                    </div>
+                    ${labels ? `<div class="issue-card-labels">${labels}</div>` : ''}
+                    ${summary ? `<div class="issue-card-summary">${renderMarkdown(summary)}</div>` : ''}
+                </div>
+            </div>
+            <div class="issue-card-actions">
+                ${commentsCount > 0 ? `
+                    <div class="comment-count">
+                        <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+                            <path d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h4.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/>
+                        </svg>
+                        ${commentsCount}
+                    </div>
+                ` : ''}
+                <button class="star-btn ${isStarred ? 'starred' : ''}" onclick="event.stopPropagation(); toggleStar(${issue.number})" title="${isStarred ? 'Unstar' : 'Star'}">
+                    ${isStarred ? '★' : '☆'}
+                </button>
+                ${!isStarredTab ? `
+                    <button class="dismiss-btn" onclick="event.stopPropagation(); dismissIssue(${issue.number})" title="Dismiss from list">
+                        ✕
+                    </button>
+                ` : ''}
+                <a href="${issue.html_url}" target="_blank" class="btn-icon-link" onclick="event.stopPropagation()" title="Open on GitHub">
+                    ↗
+                </a>
+            </div>
+        </div>`;
+}
+
+async function switchDashboardTab(tab) {
+    dashboardState.tab = tab;
+    if (tab === 'starred') {
+        // Reload starred data
+        dashboardState.starredIssues = [];
+    }
+    renderDashboardContent();
+}
+
+async function loadStarredIssues() {
+    try {
+        const data = await API.getStarred();
+        dashboardState.starredIssues = data.items || [];
+        dashboardState.starredNumbers = data.starred || dashboardState.starredNumbers;
+        renderDashboardContent();
+    } catch (err) {
+        Toast.show('Failed to load starred issues', 'error');
+    }
+}
+
+async function toggleStar(number) {
+    const isStarred = dashboardState.starredNumbers.includes(number);
+    try {
+        if (isStarred) {
+            const result = await API.unstarIssue(number);
+            dashboardState.starredNumbers = result.starred || [];
+            dashboardState.starredIssues = dashboardState.starredIssues.filter(i => i.number !== number);
+            Toast.show(`Issue #${number} unstarred`, 'info');
+        } else {
+            const result = await API.starIssue(number);
+            dashboardState.starredNumbers = result.starred || [];
+            Toast.show(`Issue #${number} starred ⭐`, 'success');
+        }
+        renderDashboardContent();
+    } catch (err) {
+        Toast.show('Failed to update star', 'error');
+    }
+}
+
+function dismissIssue(number) {
+    dashboardState.dismissed.add(number);
+    // Animate the card out
+    const card = document.querySelector(`.issue-card[data-issue-number="${number}"]`);
+    if (card) {
+        card.classList.add('issue-card-dismissed');
+        setTimeout(() => renderDashboardContent(), 300);
+    } else {
+        renderDashboardContent();
+    }
+    Toast.show(`Issue #${number} dismissed`, 'info');
+}
+
+async function refreshDashboard() {
+    dashboardState.dismissed.clear();
+    dashboardState.summaries = {};
+    await renderDashboard();
+}
+
+async function switchDashboardDays(days) {
+    if (dashboardState.days === days) return;
+    dashboardState.days = days;
+    dashboardState.dismissed.clear();
+    dashboardState.summaries = {};
+    await renderDashboard();
+}
+
+async function batchAISummary() {
+    const btn = document.getElementById('batchSummaryBtn');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ Summarizing...';
+
+    const issues = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number));
+    let completed = 0;
+    const total = issues.length;
+
+    // Create or get the progress indicator below the toolbar
+    let progressEl = document.getElementById('batchProgressIndicator');
+    if (!progressEl) {
+        const toolbar = document.querySelector('.dashboard-toolbar');
+        if (toolbar) {
+            progressEl = document.createElement('div');
+            progressEl.id = 'batchProgressIndicator';
+            progressEl.className = 'batch-progress-indicator';
+            toolbar.parentNode.insertBefore(progressEl, toolbar.nextSibling);
+        }
+    }
+
+    function updateProgress(current, totalCount, issueTitle, issueNumber) {
+        if (!progressEl) return;
+        const percent = Math.round((current / totalCount) * 100);
+        progressEl.innerHTML = `
+            <div class="batch-progress-header">
+                <span class="batch-progress-status">🤖 Analyzing issue ${current}/${totalCount}</span>
+                <span class="batch-progress-percent">${percent}%</span>
+            </div>
+            <div class="batch-progress-bar-track">
+                <div class="batch-progress-bar-fill" style="width: ${percent}%"></div>
+            </div>
+            <div class="batch-progress-issue">
+                <span class="batch-progress-issue-icon">▶</span>
+                <span class="batch-progress-issue-title">#${issueNumber} ${escapeHtml(issueTitle)}</span>
+            </div>
+        `;
+        progressEl.style.display = 'block';
+    }
+
+    for (const issue of issues) {
+        if (dashboardState.summaries[issue.number]) {
+            completed++;
+            continue; // Skip already summarized
+        }
+        // Show which issue is currently being analyzed
+        updateProgress(completed + 1, total, issue.title, issue.number);
+        // Also highlight the current card being analyzed
+        const currentCard = document.querySelector(`.issue-card[data-issue-number="${issue.number}"]`);
+        if (currentCard) currentCard.classList.add('issue-card-analyzing');
+
+        try {
+            const result = await API.aiSummarize({
+                title: issue.title,
+                body: (issue.body || '').substring(0, 2000), // Limit body length
+                labels: (issue.labels || []).map(l => l.name),
+                comments: [], // Skip comments for batch summary to save time
+            });
+            dashboardState.summaries[issue.number] = result.summary || '';
+            completed++;
+            btn.textContent = `⏳ ${completed}/${total}`;
+            // Update the card in-place
+            const summaryEl = document.querySelector(`.issue-card[data-issue-number="${issue.number}"] .issue-card-summary`);
+            if (summaryEl) {
+                summaryEl.innerHTML = renderMarkdown(dashboardState.summaries[issue.number]);
+            } else {
+                // Add summary element
+                const bodyEl = document.querySelector(`.issue-card[data-issue-number="${issue.number}"] .issue-card-body`);
+                if (bodyEl) {
+                    const div = document.createElement('div');
+                    div.className = 'issue-card-summary';
+                    div.innerHTML = renderMarkdown(dashboardState.summaries[issue.number]);
+                    bodyEl.appendChild(div);
+                }
+            }
+        } catch (err) {
+            completed++;
+            // Continue with next issue
+        }
+        // Remove analyzing highlight
+        if (currentCard) currentCard.classList.remove('issue-card-analyzing');
+    }
+
+    // Remove progress indicator with a fade
+    if (progressEl) {
+        progressEl.classList.add('batch-progress-done');
+        setTimeout(() => progressEl.remove(), 600);
+    }
+
+    btn.disabled = false;
+    btn.textContent = '🤖 Batch Summary';
+    Toast.show('Batch summary complete!', 'success');
 }
 
 // ============================================================================
@@ -713,9 +1023,9 @@ async function openIssueDetail(number) {
                     Open on GitHub ↗
                 </a>
                 ${issue.state === 'open' ?
-                    `<button class="btn btn-danger btn-sm" onclick="closeIssue(${issue.number})">Close Issue</button>` :
-                    `<button class="btn btn-success btn-sm" onclick="reopenIssue(${issue.number})">Reopen Issue</button>`
-                }
+                `<button class="btn btn-danger btn-sm" onclick="closeIssue(${issue.number})">Close Issue</button>` :
+                `<button class="btn btn-success btn-sm" onclick="reopenIssue(${issue.number})">Reopen Issue</button>`
+            }
             </div>
 
             <!-- Issue Body -->
@@ -742,22 +1052,55 @@ async function openIssueDetail(number) {
                 `).join('')}
             </div>
 
-            <!-- AI Reply Panel -->
+            <!-- AI Reply Assistant Panel -->
             <div class="ai-panel">
                 <div class="ai-panel-header">
                     <div class="ai-panel-title">
                         <span class="spark">✨</span> AI Reply Assistant
                     </div>
-                    <button class="btn btn-primary btn-sm" id="aiGenerateBtn" onclick="generateAIReply(${issue.number})">
-                        Generate Reply
+                    <button class="btn btn-primary btn-sm" id="helpToResponseBtn" onclick="helpToResponse(${issue.number})">
+                        💬 Help to Response
                     </button>
                 </div>
-                <textarea class="ai-reply-editor" id="aiReplyEditor" placeholder="AI-generated reply will appear here. You can edit it before posting."></textarea>
-                <div class="ai-panel-actions">
-                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('aiReplyEditor').value=''">Clear</button>
-                    <button class="btn btn-success" id="postCommentBtn" onclick="postAIComment(${issue.number})">
-                        Post Comment to GitHub
+
+                <!-- Chat Messages Area -->
+                <div class="ai-chat-messages" id="aiChatMessages" style="display:none"></div>
+
+                <!-- Chat Input -->
+                <div class="ai-chat-input-row" id="aiChatInputRow" style="display:none">
+                    <div class="ai-chat-input-wrap">
+                        <textarea class="ai-chat-input" id="aiChatInput" rows="2" placeholder="继续追问，例如：这个 issue 的技术细节是什么？" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();sendChatMessage(${issue.number})}"></textarea>
+                        <span class="ai-chat-input-hint">Ctrl + Enter 发送</span>
+                    </div>
+                    <div class="ai-chat-input-btns">
+                        <button class="btn btn-primary btn-sm" onclick="sendChatMessage(${issue.number})">
+                            发送
+                        </button>
+                        <button class="btn btn-danger btn-sm" id="stopChatBtn" onclick="stopChatMessage()" style="display:none">
+                            ⏹ 停止
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Generate Reply & Undo Buttons -->
+                <div class="ai-panel-actions" id="aiGenerateActions" style="display:none">
+                    <button class="btn btn-secondary btn-sm" onclick="undoLastChat()" title="撤销上一条消息">
+                        ↩ Undo Last
                     </button>
+                    <button class="btn btn-primary" id="generateReplyBtn" onclick="generateFinalReply(${issue.number})">
+                        ✍️ Generate Reply
+                    </button>
+                </div>
+
+                <!-- Reply Editor (shown after generating reply) -->
+                <div id="aiReplySection" style="display:none">
+                    <textarea class="ai-reply-editor" id="aiReplyEditor" placeholder="AI-generated reply will appear here. You can edit it before posting."></textarea>
+                    <div class="ai-panel-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('aiReplyEditor').value=''">Clear</button>
+                        <button class="btn btn-success" id="postCommentBtn" onclick="postAIComment(${issue.number})">
+                            Post Comment to GitHub
+                        </button>
+                    </div>
                 </div>
             </div>`;
 
@@ -792,29 +1135,231 @@ async function reopenIssue(number) {
     } catch { /* handled */ }
 }
 
-async function generateAIReply(number) {
-    const btn = document.getElementById('aiGenerateBtn');
-    const editor = document.getElementById('aiReplyEditor');
+async function helpToResponse(number) {
+    const btn = document.getElementById('helpToResponseBtn');
+    const chatArea = document.getElementById('aiChatMessages');
+    const chatInputRow = document.getElementById('aiChatInputRow');
+    const generateActions = document.getElementById('aiGenerateActions');
+    const panel = document.getElementById('detailPanel');
+
     btn.disabled = true;
-    btn.textContent = 'Generating...';
-    editor.value = 'Generating AI reply, please wait...';
+    btn.textContent = '⏳ Analyzing...';
+    chatArea.style.display = 'block';
+
+    // Initialize chat history
+    panel._chatHistory = [];
+
+    // Show typing indicator
+    chatArea.innerHTML = `<div class="ai-chat-msg assistant">
+        <div class="msg-avatar">🤖</div>
+        <div class="msg-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>
+    </div>`;
 
     try {
-        const panel = document.getElementById('detailPanel');
         const { issue, comments } = panel._currentIssue;
-        const result = await API.aiGenerate({
+        const result = await API.aiSummarize({
             title: issue.title,
             body: issue.body,
             labels: (issue.labels || []).map(l => l.name),
             comments: comments,
         });
-        editor.value = result.reply || '';
-        Toast.show('AI reply generated! Review and edit before posting.', 'success');
+
+        const summaryText = result.summary || '';
+        // Store in chat history as assistant message
+        panel._chatHistory.push({ role: 'assistant', content: summaryText });
+
+        // Render the analysis
+        chatArea.innerHTML = `<div class="ai-chat-msg assistant">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-content">${renderMarkdown(summaryText)}</div>
+        </div>`;
+
+        // Show chat input and generate reply button
+        chatInputRow.style.display = 'flex';
+        generateActions.style.display = 'flex';
+        Toast.show('Issue 分析完成！你可以继续追问或直接生成回复', 'success');
     } catch (err) {
-        editor.value = '';
+        chatArea.innerHTML = `<div class="ai-chat-msg assistant">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-content">分析失败，请重试。</div>
+        </div>`;
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Generate Reply';
+        btn.textContent = '💬 Help to Response';
+    }
+}
+
+// Track the current chat AbortController
+let _chatAbortController = null;
+
+function undoLastChat() {
+    const panel = document.getElementById('detailPanel');
+    const chatArea = document.getElementById('aiChatMessages');
+    if (!panel._chatHistory || panel._chatHistory.length < 2) return;
+
+    // Remove last assistant + user pair
+    const lastMsg = panel._chatHistory[panel._chatHistory.length - 1];
+    if (lastMsg.role === 'assistant') {
+        panel._chatHistory.pop(); // remove assistant
+        panel._chatHistory.pop(); // remove user
+    } else if (lastMsg.role === 'user') {
+        // User sent but no response yet — just remove user
+        panel._chatHistory.pop();
+    }
+
+    // Re-render all chat messages
+    _rerenderChatMessages(chatArea, panel._chatHistory);
+    Toast.show('已撤销上一条消息', 'info');
+}
+
+function stopChatMessage() {
+    if (_chatAbortController) {
+        _chatAbortController.abort();
+        _chatAbortController = null;
+    }
+}
+
+function _rerenderChatMessages(chatArea, history) {
+    let html = '';
+    for (const msg of history) {
+        if (msg.role === 'assistant') {
+            html += `<div class="ai-chat-msg assistant">
+                <div class="msg-avatar">🤖</div>
+                <div class="msg-content">${renderMarkdown(msg.content)}</div>
+            </div>`;
+        } else if (msg.role === 'user') {
+            html += `<div class="ai-chat-msg user">
+                <div class="msg-content">${escapeHtml(msg.content)}</div>
+                <div class="msg-avatar">👤</div>
+            </div>`;
+        }
+    }
+    chatArea.innerHTML = html;
+    chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+async function sendChatMessage(number) {
+    const input = document.getElementById('aiChatInput');
+    const chatArea = document.getElementById('aiChatMessages');
+    const panel = document.getElementById('detailPanel');
+    const stopBtn = document.getElementById('stopChatBtn');
+    const message = input.value.trim();
+
+    if (!message) return;
+    input.value = '';
+
+    // Add user message to history and UI (with undo button)
+    panel._chatHistory.push({ role: 'user', content: message });
+    chatArea.innerHTML += `<div class="ai-chat-msg user">
+        <div class="msg-content">${escapeHtml(message)}</div>
+        <div class="msg-avatar">👤</div>
+    </div>`;
+
+    // Show typing indicator
+    chatArea.innerHTML += `<div class="ai-chat-msg assistant typing-msg">
+        <div class="msg-avatar">🤖</div>
+        <div class="msg-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>
+    </div>`;
+    chatArea.scrollTop = chatArea.scrollHeight;
+
+    // Show stop button, disable send
+    if (stopBtn) stopBtn.style.display = 'inline-flex';
+    input.disabled = true;
+
+    // Set up abort controller
+    _chatAbortController = new AbortController();
+
+    try {
+        const { issue, comments } = panel._currentIssue;
+        const result = await API.aiChat({
+            messages: panel._chatHistory,
+            title: issue.title,
+            body: issue.body,
+            labels: (issue.labels || []).map(l => l.name),
+            comments: comments,
+        });
+
+        // Check if aborted
+        if (_chatAbortController && _chatAbortController.signal.aborted) throw new Error('aborted');
+
+        const reply = result.reply || '';
+        panel._chatHistory.push({ role: 'assistant', content: reply });
+
+        // Remove typing indicator and add response
+        const typingEl = chatArea.querySelector('.typing-msg');
+        if (typingEl) typingEl.remove();
+
+        chatArea.innerHTML += `<div class="ai-chat-msg assistant">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-content">${renderMarkdown(reply)}</div>
+        </div>`;
+    } catch (err) {
+        const typingEl = chatArea.querySelector('.typing-msg');
+        if (typingEl) typingEl.remove();
+
+        if (err.message === 'aborted' || (err.name === 'AbortError')) {
+            // User stopped — undo the user message too
+            panel._chatHistory.pop(); // remove user msg
+            _rerenderChatMessages(chatArea, panel._chatHistory);
+            Toast.show('已停止生成', 'info');
+        } else {
+            chatArea.innerHTML += `<div class="ai-chat-msg assistant">
+                <div class="msg-avatar">🤖</div>
+                <div class="msg-content">回复失败，请重试。</div>
+            </div>`;
+        }
+    } finally {
+        _chatAbortController = null;
+        if (stopBtn) stopBtn.style.display = 'none';
+        input.disabled = false;
+        input.focus();
+    }
+
+    chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+async function generateFinalReply(number) {
+    const btn = document.getElementById('generateReplyBtn');
+    const replySection = document.getElementById('aiReplySection');
+    const editor = document.getElementById('aiReplyEditor');
+    const panel = document.getElementById('detailPanel');
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating Reply...';
+
+    // Capture any unsent text in the input box
+    const pendingInput = document.getElementById('aiChatInput');
+    const pendingText = pendingInput ? pendingInput.value.trim() : '';
+
+    // Add instruction to generate final reply, including unsent input as extra context
+    let replyInstruction = '请根据我们之前的讨论，生成一段专业、友好的英文回复，可以直接发布到 GitHub Issue 上。使用 Markdown 格式，回复内容要简洁专业。只输出回复内容本身，不要包含其他解释。';
+    if (pendingText) {
+        replyInstruction += `\n\n另外，用户还有以下补充要求：${pendingText}`;
+    }
+    const generateMessages = [...(panel._chatHistory || []), {
+        role: 'user',
+        content: replyInstruction
+    }];
+
+    try {
+        const { issue, comments } = panel._currentIssue;
+        const result = await API.aiChat({
+            messages: generateMessages,
+            title: issue.title,
+            body: issue.body,
+            labels: (issue.labels || []).map(l => l.name),
+            comments: comments,
+        });
+
+        editor.value = result.reply || '';
+        replySection.style.display = 'block';
+        Toast.show('Reply generated! Review and edit before posting.', 'success');
+    } catch (err) {
+        editor.value = '';
+        Toast.show('Failed to generate reply', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '✍️ Generate Reply';
     }
 }
 
@@ -884,7 +1429,7 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('repoSelect').addEventListener('change', (e) => {
     State.currentRepo = e.target.value;
     // Save to backend
-    API.saveSettings({ current_repo: State.currentRepo }).catch(() => {});
+    API.saveSettings({ current_repo: State.currentRepo }).catch(() => { });
     // Re-render current page
     const handler = Router.routes[Router.current];
     if (handler) handler();
@@ -898,6 +1443,7 @@ document.getElementById('overlay').addEventListener('click', closeDetail);
 // ============================================================================
 async function initApp() {
     Toast.init();
+    ThemeManager.init();
 
     // Load settings
     await State.loadSettings();
