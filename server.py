@@ -8,6 +8,7 @@ No external dependencies required (uses urllib for HTTP requests).
 import json
 import os
 import re
+import ssl
 import sys
 import logging
 import urllib.request
@@ -36,6 +37,41 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 # Ensure directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# SSL Context — handles servers lacking CA certificates
+# ---------------------------------------------------------------------------
+def _create_ssl_context():
+    """Create an SSL context for HTTPS requests.
+    Tries system certs first, then certifi, then falls back to unverified.
+    Set env SSL_VERIFY=0 to skip verification entirely.
+    """
+    if os.environ.get('SSL_VERIFY', '1') == '0':
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    # Try default system certs
+    try:
+        ctx = ssl.create_default_context()
+        # Quick test — if this doesn't raise, certs are loadable
+        ctx.load_default_locations()
+        return ctx
+    except Exception:
+        pass
+    # Try certifi package
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    # Fallback: unverified
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+ssl_context = _create_ssl_context()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -136,7 +172,7 @@ def github_request(path, method='GET', body=None, token=None):
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
             resp_body = resp.read().decode('utf-8')
             # Parse Link header for pagination
             link_header = resp.getheader('Link', '')
@@ -220,7 +256,7 @@ Based on the following GitHub Issue, generate a professional, friendly reply.
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
             reply = msg.get('content') or msg.get('reasoning_content') or ''
@@ -292,7 +328,7 @@ def ai_generate_summary(issue_title, issue_body, labels, comments):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
             reply = msg.get('content') or msg.get('reasoning_content') or ''
@@ -359,7 +395,7 @@ def ai_chat(messages, issue_title, issue_body, labels, comments):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
             reply = msg.get('content') or msg.get('reasoning_content') or ''
@@ -525,7 +561,7 @@ class APIHandler(SimpleHTTPRequestHandler):
         }
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as resp:
                 self._json_response({'ok': True, 'message': f'Connected successfully. Model: {model}'})
         except Exception as e:
             self._json_response({'ok': False, 'message': str(e)}, 400)
