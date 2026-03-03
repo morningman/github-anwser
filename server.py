@@ -13,7 +13,15 @@ import logging
 import urllib.request
 import urllib.parse
 import urllib.error
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler
+try:
+    from http.server import ThreadingHTTPServer
+except ImportError:
+    # Python < 3.7: ThreadingHTTPServer is not available, build one manually
+    import socketserver
+    from http.server import HTTPServer
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -715,7 +723,9 @@ class APIHandler(SimpleHTTPRequestHandler):
         result, status, _ = github_request(f'/search/issues?{params}')
 
         if status != 200:
-            self._json_response({'error': 'Failed to fetch issues from GitHub'}, 500)
+            err_msg = result.get('message', 'Unknown error') if isinstance(result, dict) else str(result)
+            logger.error(f'Dashboard: GitHub API returned {status}: {err_msg}')
+            self._json_response({'error': f'GitHub API error ({status}): {err_msg}'}, 500)
             return
 
         items = [i for i in result.get('items', []) if 'pull_request' not in i][:20]

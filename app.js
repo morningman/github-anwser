@@ -271,9 +271,11 @@ async function renderDashboard() {
 
         renderDashboardContent();
     } catch (err) {
+        console.error('Dashboard load error:', err);
         setContent(`<div class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <p>Failed to load dashboard. Please check your settings.</p>
+            <p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-top:var(--space-2);word-break:break-all;">Error: ${escapeHtml(err.message || String(err))}</p>
             <a href="#settings" class="btn btn-primary">Go to Settings</a>
         </div>`);
     }
