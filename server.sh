@@ -4,11 +4,12 @@
 # Usage: ./server.sh {start|stop|restart|status|log}
 #
 
+export PATH=/mnt/disk1/yy/tools/python/bin:$PATH
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PID_FILE="$SCRIPT_DIR/server.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
 LOG_FILE="$LOG_DIR/server.log"
-PORT=8080
+PORT=8081
 PYTHON="${PYTHON:-python3}"
 
 mkdir -p "$LOG_DIR"
