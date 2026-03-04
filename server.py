@@ -411,6 +411,77 @@ def ai_chat(messages, issue_title, issue_body, labels, comments):
         return None, str(e)
 
 
+def ai_generate_direct_reply(user_input, issue_title, issue_body, labels, comments):
+    """Call LLM API to generate an English reply based on user's input and issue context."""
+    cfg = load_config()
+    api_key = cfg.get('ai_api_key', '')
+    base_url = cfg.get('ai_base_url', 'https://api.openai.com/v1').rstrip('/')
+    model = cfg.get('ai_model', 'gpt-4o')
+
+    if not api_key:
+        return None, 'AI API Key not configured'
+
+    comments_text = ''
+    for c in (comments or [])[-5:]:
+        comments_text += f"**{c.get('user', {}).get('login', 'unknown')}**: {c.get('body', '')}\n\n"
+
+    labels_text = ', '.join(labels) if labels else 'None'
+
+    prompt = f"""You are a helpful assistant for an open-source project maintainer.
+Based on the following GitHub Issue context and the maintainer's intended reply, generate a professional, polished English reply that can be directly posted as a GitHub Issue comment.
+
+## Issue Context
+- Title: {issue_title}
+- Body:
+{issue_body or '(empty)'}
+- Labels: {labels_text}
+
+## Recent Comments (last 5)
+{comments_text or '(no comments yet)'}
+
+## Maintainer's Intended Reply
+{user_input}
+
+## Requirements
+1. Generate the reply based on the maintainer's intended reply above
+2. Keep the original meaning and intent of the maintainer's input
+3. Make it professional, friendly, and well-structured
+4. Use proper English
+5. Use Markdown formatting where appropriate
+6. Only output the reply content itself, no additional explanations or meta-text
+7. If the maintainer's input is in a non-English language, translate and polish the content into English"""
+
+    url = f'{base_url}/chat/completions'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    }
+    payload = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'temperature': 0.7,
+        'max_tokens': 4096,
+    }
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+            msg = result['choices'][0]['message']
+            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            if not reply:
+                return None, 'AI returned empty response'
+            return reply, None
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8') if e.fp else ''
+        logger.error(f'AI API error: {e.code} {err_body[:200]}')
+        return None, f'AI API error: {e.code}'
+    except Exception as e:
+        logger.error(f'AI API exception: {e}')
+        return None, str(e)
+
+
 # ---------------------------------------------------------------------------
 # Request Handler
 # ---------------------------------------------------------------------------
@@ -473,6 +544,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._handle_ai_summarize(body)
         elif path == '/api/ai/chat':
             self._handle_ai_chat(body)
+        elif path == '/api/ai/direct-reply':
+            self._handle_ai_direct_reply(body)
         elif re.match(r'^/api/issues/(\d+)/comments$', path):
             num = re.match(r'^/api/issues/(\d+)/comments$', path).group(1)
             self._handle_post_comment(num, body)
@@ -867,6 +940,23 @@ class APIHandler(SimpleHTTPRequestHandler):
         comments = body.get('comments', [])
 
         reply, error = ai_chat(messages, title, issue_body, labels, comments)
+        if reply:
+            self._json_response({'ok': True, 'reply': reply})
+        else:
+            self._json_response({'ok': False, 'message': error}, 500)
+
+    def _handle_ai_direct_reply(self, body):
+        user_input = body.get('user_input', '')
+        title = body.get('title', '')
+        issue_body = body.get('body', '')
+        labels = body.get('labels', [])
+        comments = body.get('comments', [])
+
+        if not user_input:
+            self._json_response({'ok': False, 'message': 'User input is required'}, 400)
+            return
+
+        reply, error = ai_generate_direct_reply(user_input, title, issue_body, labels, comments)
         if reply:
             self._json_response({'ok': True, 'reply': reply})
         else:

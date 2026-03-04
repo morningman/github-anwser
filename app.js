@@ -84,6 +84,7 @@ const API = {
     aiGenerate: (b) => API.request('/api/ai/generate-reply', { method: 'POST', body: b }),
     aiSummarize: (b) => API.request('/api/ai/summarize', { method: 'POST', body: b }),
     aiChat: (b) => API.request('/api/ai/chat', { method: 'POST', body: b }),
+    aiDirectReply: (b) => API.request('/api/ai/direct-reply', { method: 'POST', body: b }),
     postComment: (num, body) => API.request(`/api/issues/${num}/comments`, { method: 'POST', body: { body } }),
     patchIssue: (num, b) => API.request(`/api/issues/${num}`, { method: 'PATCH', body: b }),
     getDashboardIssues: (days) => API.request(`/api/dashboard-issues?days=${days || 7}`),
@@ -1065,6 +1066,18 @@ async function openIssueDetail(number) {
                     </button>
                 </div>
 
+                <!-- Direct Reply Input -->
+                <div class="ai-direct-reply-section">
+                    <div class="ai-direct-reply-input-wrap">
+                        <textarea class="ai-direct-reply-input" id="aiDirectReplyInput" rows="3" placeholder="输入你想回复的内容（可以用中文），AI 会根据 Issue 上下文帮你生成专业的英文回复..."></textarea>
+                    </div>
+                    <div class="ai-direct-reply-actions">
+                        <button class="btn btn-generate btn-sm" id="generateDirectBtn" onclick="generateDirectResponse(${issue.number})">
+                            🚀 Generate Response
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Chat Messages Area -->
                 <div class="ai-chat-messages" id="aiChatMessages" style="display:none"></div>
 
@@ -1386,6 +1399,51 @@ async function postAIComment(number) {
     } catch { /* handled */ } finally {
         btn.disabled = false;
         btn.textContent = 'Post Comment to GitHub';
+    }
+}
+
+// ============================================================================
+// Direct Response Generation (skip chat, generate reply directly)
+// ============================================================================
+async function generateDirectResponse(number) {
+    const input = document.getElementById('aiDirectReplyInput');
+    const btn = document.getElementById('generateDirectBtn');
+    const replySection = document.getElementById('aiReplySection');
+    const editor = document.getElementById('aiReplyEditor');
+    const panel = document.getElementById('detailPanel');
+    const userInput = input.value.trim();
+
+    if (!userInput) {
+        Toast.show('请先输入你想回复的内容', 'warning');
+        input.focus();
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating...';
+    input.disabled = true;
+
+    try {
+        const { issue, comments } = panel._currentIssue;
+        const result = await API.aiDirectReply({
+            user_input: userInput,
+            title: issue.title,
+            body: issue.body,
+            labels: (issue.labels || []).map(l => l.name),
+            comments: comments,
+        });
+
+        editor.value = result.reply || '';
+        replySection.style.display = 'block';
+        replySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        Toast.show('Reply generated! Review and edit before posting.', 'success');
+    } catch (err) {
+        editor.value = '';
+        Toast.show('Failed to generate reply', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🚀 Generate Response';
+        input.disabled = false;
     }
 }
 
