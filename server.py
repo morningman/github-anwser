@@ -203,8 +203,202 @@ def parse_link_header(link_header):
 
 
 # ---------------------------------------------------------------------------
+# GitHub GraphQL API helpers
+# ---------------------------------------------------------------------------
+GITHUB_GRAPHQL_API = 'https://api.github.com/graphql'
+
+
+def github_graphql_request(query, variables=None, token=None):
+    """Make a request to the GitHub GraphQL API."""
+    if token is None:
+        token = load_config().get('github_token', '')
+
+    if not token:
+        return {'errors': [{'message': 'GitHub token not configured'}]}, 401
+
+    headers = {
+        'Authorization': f'bearer {token}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'GitHub-Issue-Manager/1.0',
+    }
+
+    payload = {'query': query}
+    if variables:
+        payload['variables'] = variables
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(GITHUB_GRAPHQL_API, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
+            resp_body = resp.read().decode('utf-8')
+            result = json.loads(resp_body) if resp_body else {}
+            return result, resp.status
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8') if e.fp else '{}'
+        logger.error(f'GitHub GraphQL API error: {e.code} {err_body[:200]}')
+        try:
+            return json.loads(err_body), e.code
+        except json.JSONDecodeError:
+            return {'message': err_body[:200]}, e.code
+    except Exception as e:
+        logger.error(f'GitHub GraphQL API exception: {e}')
+        return {'message': str(e)}, 500
+
+
+def fetch_discussions(owner, name, first=20, after=None, since_days=None,
+                      order_by='UPDATED_AT', direction='DESC', category_id=None):
+    """Fetch discussions from a GitHub repository using GraphQL API."""
+    # Build the orderBy parameter
+    order_field = order_by if order_by in ('UPDATED_AT', 'CREATED_AT') else 'UPDATED_AT'
+    order_direction = direction if direction in ('ASC', 'DESC') else 'DESC'
+
+    # Build category filter
+    category_filter = f', categoryId: "{category_id}"' if category_id else ''
+    after_clause = f', after: "{after}"' if after else ''
+
+    query = f"""
+    query {{
+      repository(owner: "{owner}", name: "{name}") {{
+        discussions(first: {first}{after_clause}{category_filter},
+                    orderBy: {{field: {order_field}, direction: {order_direction}}}) {{
+          totalCount
+          pageInfo {{
+            hasNextPage
+            hasPreviousPage
+            endCursor
+            startCursor
+          }}
+          nodes {{
+            number
+            title
+            body
+            createdAt
+            updatedAt
+            url
+            isAnswered
+            author {{
+              login
+              avatarUrl
+            }}
+            category {{
+              name
+              emoji
+              id
+            }}
+            labels(first: 5) {{
+              nodes {{
+                name
+                color
+              }}
+            }}
+            comments(first: 0) {{
+              totalCount
+            }}
+          }}
+        }}
+        discussionCategories(first: 20) {{
+          nodes {{
+            id
+            name
+            emoji
+          }}
+        }}
+      }}
+    }}
+    """
+
+    result, status = github_graphql_request(query)
+    if status != 200 or 'errors' in result:
+        errors = result.get('errors', [{'message': 'Unknown error'}])
+        return {'error': errors[0].get('message', 'GraphQL error')}, status
+
+    repo_data = result.get('data', {}).get('repository', {})
+    discussions_data = repo_data.get('discussions', {})
+    categories_data = repo_data.get('discussionCategories', {}).get('nodes', [])
+    nodes = discussions_data.get('nodes', [])
+    page_info = discussions_data.get('pageInfo', {})
+    total_count = discussions_data.get('totalCount', 0)
+
+    # Filter by since_days if specified (client-side filter since GraphQL
+    # discussions query doesn't have a native 'since' filter)
+    if since_days:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+
+        def _parse_gh_datetime(s):
+            """Parse GitHub ISO datetime string like '2026-03-10T12:00:00Z'."""
+            s = s.replace('Z', '+00:00')
+            try:
+                return datetime.strptime(s, '%Y-%m-%dT%H:%M:%S%z')
+            except ValueError:
+                return datetime.strptime(s[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+
+        nodes = [n for n in nodes if _parse_gh_datetime(n['updatedAt']) >= cutoff]
+
+    # Normalize the data to a simpler format for frontend
+    items = []
+    for node in nodes:
+        author = node.get('author') or {}
+        category = node.get('category') or {}
+        labels_nodes = (node.get('labels') or {}).get('nodes', [])
+        comments_data_node = node.get('comments') or {}
+
+        items.append({
+            'number': node.get('number'),
+            'title': node.get('title', ''),
+            'body': (node.get('body') or '')[:500],  # Limit body length
+            'created_at': node.get('createdAt', ''),
+            'updated_at': node.get('updatedAt', ''),
+            'html_url': node.get('url', ''),
+            'is_answered': node.get('isAnswered', False),
+            'user': {
+                'login': author.get('login', 'ghost'),
+                'avatar_url': author.get('avatarUrl', ''),
+            },
+            'category': {
+                'name': category.get('name', ''),
+                'emoji': category.get('emoji', ''),
+                'id': category.get('id', ''),
+            },
+            'labels': [
+                {'name': l.get('name', ''), 'color': l.get('color', 'cccccc')}
+                for l in labels_nodes
+            ],
+            'comments': comments_data_node.get('totalCount', 0),
+        })
+
+    return {
+        'items': items,
+        'total_count': total_count,
+        'page_info': {
+            'has_next_page': page_info.get('hasNextPage', False),
+            'has_previous_page': page_info.get('hasPreviousPage', False),
+            'end_cursor': page_info.get('endCursor'),
+            'start_cursor': page_info.get('startCursor'),
+        },
+        'categories': [
+            {'id': c.get('id', ''), 'name': c.get('name', ''), 'emoji': c.get('emoji', '')}
+            for c in categories_data
+        ],
+    }, 200
+
+
+
+# ---------------------------------------------------------------------------
 # AI / LLM helpers
 # ---------------------------------------------------------------------------
+def _strip_think_tags(text):
+    """Remove <think>...</think> blocks from AI response content.
+
+    MiniMax M2.5 (and similar reasoning models) embed their chain-of-thought
+    inside <think> tags in the content field.  We strip these so that only
+    the final answer is surfaced to users.
+    """
+    if not text:
+        return text
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+
 def ai_generate_reply(issue_title, issue_body, labels, comments):
     """Call LLM API to generate a reply."""
     cfg = load_config()
@@ -259,7 +453,7 @@ Based on the following GitHub Issue, generate a professional, friendly reply.
         with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
-            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            reply = _strip_think_tags(msg.get('content') or msg.get('reasoning_content') or '')
             if not reply:
                 return None, 'AI returned empty response'
             return reply, None
@@ -331,7 +525,7 @@ def ai_generate_summary(issue_title, issue_body, labels, comments):
         with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
-            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            reply = _strip_think_tags(msg.get('content') or msg.get('reasoning_content') or '')
             if not reply:
                 return None, 'AI returned empty response'
             return reply, None
@@ -398,7 +592,7 @@ def ai_chat(messages, issue_title, issue_body, labels, comments):
         with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
-            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            reply = _strip_think_tags(msg.get('content') or msg.get('reasoning_content') or '')
             if not reply:
                 return None, 'AI returned empty response'
             return reply, None
@@ -469,7 +663,7 @@ Based on the following GitHub Issue context and the maintainer's intended reply,
         with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             msg = result['choices'][0]['message']
-            reply = msg.get('content') or msg.get('reasoning_content') or ''
+            reply = _strip_think_tags(msg.get('content') or msg.get('reasoning_content') or '')
             if not reply:
                 return None, 'AI returned empty response'
             return reply, None
@@ -522,6 +716,8 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._handle_get_stats()
         elif path == '/api/dashboard-issues':
             self._handle_get_dashboard_issues(query)
+        elif path == '/api/discussions':
+            self._handle_get_discussions(query)
         elif path == '/api/starred':
             self._handle_get_starred()
         else:
@@ -628,13 +824,22 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._json_response({'ok': False, 'message': 'API Key not provided'}, 400)
             return
 
-        url = f'{base_url}/models'
+        # Use a lightweight chat completion call to test connectivity.
+        # The /models endpoint is not supported by all providers (e.g. MiniMax).
+        url = f'{base_url}/chat/completions'
         headers = {
+            'Content-Type': 'application/json',
             'Authorization': f'Bearer {api_key}',
         }
-        req = urllib.request.Request(url, headers=headers)
+        payload = {
+            'model': model,
+            'messages': [{'role': 'user', 'content': 'Hi'}],
+            'max_tokens': 16,
+        }
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data, headers=headers, method='POST')
         try:
-            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
                 self._json_response({'ok': True, 'message': f'Connected successfully. Model: {model}'})
         except Exception as e:
             self._json_response({'ok': False, 'message': str(e)}, 400)
@@ -848,6 +1053,62 @@ class APIHandler(SimpleHTTPRequestHandler):
             'starred': starred_numbers,
             'total_count': len(items),
         })
+
+    # --- Discussions (GitHub Discussions via GraphQL) ------------------------
+    def _handle_get_discussions(self, query=None):
+        """Fetch GitHub Discussions for the current repo."""
+        try:
+            cfg = load_config()
+            repo = cfg.get('current_repo', 'apache/doris')
+            owner, name = repo.split('/')
+
+            # Parse query parameters
+            per_page = 20
+            after = None
+            since_days = None
+            order_by = 'UPDATED_AT'
+            direction = 'DESC'
+            category_id = None
+
+            if query:
+                if 'per_page' in query:
+                    try:
+                        per_page = min(int(query['per_page'][0]), 50)
+                    except (ValueError, IndexError):
+                        pass
+                if 'after' in query:
+                    after = query['after'][0]
+                if 'days' in query:
+                    try:
+                        since_days = int(query['days'][0])
+                    except (ValueError, IndexError):
+                        pass
+                if 'sort' in query:
+                    sort_val = query['sort'][0]
+                    if sort_val == 'created':
+                        order_by = 'CREATED_AT'
+                    else:
+                        order_by = 'UPDATED_AT'
+                if 'direction' in query:
+                    direction = query['direction'][0].upper()
+                if 'category' in query:
+                    category_id = query['category'][0]
+
+            logger.info(f'Discussions: fetching for {repo}, days={since_days}, order={order_by}')
+            result, status = fetch_discussions(
+                owner, name,
+                first=per_page,
+                after=after,
+                since_days=since_days,
+                order_by=order_by,
+                direction=direction,
+                category_id=category_id,
+            )
+
+            self._json_response(result, status)
+        except Exception as e:
+            logger.error(f'Discussions handler error: {e}', exc_info=True)
+            self._json_response({'error': f'Internal error: {str(e)}'}, 500)
 
 
     # --- Starred Issues (local storage) -------------------------------------

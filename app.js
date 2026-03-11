@@ -64,6 +64,10 @@ const API = {
         }
         try {
             const resp = await fetch(path, config);
+            const contentType = resp.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                throw new Error(`Server returned non-JSON response (${resp.status}). Please restart the server.`);
+            }
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.message || data.error || `HTTP ${resp.status}`);
             return data;
@@ -81,13 +85,14 @@ const API = {
     getLabels: () => API.request('/api/labels'),
     getMyIssues: (params) => API.request(`/api/my-issues?${new URLSearchParams(params)}`),
     getStats: () => API.request('/api/stats'),
+    getDiscussions: (params) => API.request(`/api/discussions?${new URLSearchParams(params)}`),
     aiGenerate: (b) => API.request('/api/ai/generate-reply', { method: 'POST', body: b }),
     aiSummarize: (b) => API.request('/api/ai/summarize', { method: 'POST', body: b }),
     aiChat: (b) => API.request('/api/ai/chat', { method: 'POST', body: b }),
     aiDirectReply: (b) => API.request('/api/ai/direct-reply', { method: 'POST', body: b }),
     postComment: (num, body) => API.request(`/api/issues/${num}/comments`, { method: 'POST', body: { body } }),
     patchIssue: (num, b) => API.request(`/api/issues/${num}`, { method: 'PATCH', body: b }),
-    getDashboardIssues: (days) => API.request(`/api/dashboard-issues?days=${days || 7}`),
+    getIssuesPageIssues: (days) => API.request(`/api/dashboard-issues?days=${days || 7}`),
     getStarred: () => API.request('/api/starred'),
     starIssue: (num) => API.request('/api/starred', { method: 'POST', body: { number: num } }),
     unstarIssue: (num) => API.request('/api/starred', { method: 'DELETE', body: { number: num } }),
@@ -194,14 +199,14 @@ const Router = {
         this._handleRoute();
     },
     _handleRoute() {
-        const hash = window.location.hash.slice(1) || 'dashboard';
+        const hash = window.location.hash.slice(1) || 'issues';
         const page = hash.split('/')[0];
         if (this.routes[page]) {
             this.current = page;
             this._updateNavLinks(page);
             this.routes[page]();
         } else {
-            this.navigate('dashboard');
+            this.navigate('issues');
         }
     },
     _updateNavLinks(page) {
@@ -251,9 +256,9 @@ function showLoading() {
 }
 
 // ============================================================================
-// Dashboard Page
+// Issues Page
 // ============================================================================
-let dashboardState = {
+let issuesState = {
     tab: 'top',          // 'top' or 'starred'
     days: 3,             // 3 or 7 — time range for top issues
     topIssues: [],
@@ -263,79 +268,79 @@ let dashboardState = {
     summaries: {},        // number -> summary text
 };
 
-async function renderDashboard() {
+async function renderIssues() {
     showLoading();
     try {
-        const data = await API.getDashboardIssues(dashboardState.days);
-        dashboardState.topIssues = data.items || [];
-        dashboardState.starredNumbers = data.starred || [];
+        const data = await API.getIssuesPageIssues(issuesState.days);
+        issuesState.topIssues = data.items || [];
+        issuesState.starredNumbers = data.starred || [];
 
-        renderDashboardContent();
+        renderIssuesContent();
     } catch (err) {
-        console.error('Dashboard load error:', err);
+        console.error('Issues load error:', err);
         setContent(`<div class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <p>Failed to load dashboard. Please check your settings.</p>
+            <p>Failed to load issues. Please check your settings.</p>
             <p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-top:var(--space-2);word-break:break-all;">Error: ${escapeHtml(err.message || String(err))}</p>
             <a href="#settings" class="btn btn-primary">Go to Settings</a>
         </div>`);
     }
 }
 
-function renderDashboardContent() {
-    const topCount = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number)).length;
-    const starredCount = dashboardState.starredNumbers.length;
+function renderIssuesContent() {
+    const topCount = issuesState.topIssues.filter(i => !issuesState.dismissed.has(i.number)).length;
+    const starredCount = issuesState.starredNumbers.length;
 
     let html = `
         <div class="page-header">
-            <h1 class="page-title">Dashboard</h1>
+            <h1 class="page-title">Issues</h1>
             <p class="page-subtitle">High-value issue triage for ${escapeHtml(State.currentRepo)}</p>
         </div>
 
-        <div class="dashboard-stats-bar">
+        <div class="issues-stats-bar">
             <div class="dash-stat"><span class="dash-stat-value">${topCount}</span><span class="dash-stat-label">Top Issues</span></div>
             <div class="dash-stat"><span class="dash-stat-value">${starredCount}</span><span class="dash-stat-label">Starred</span></div>
         </div>
 
-        <div class="dashboard-toolbar">
-            <div class="dashboard-tabs">
-                <button class="dashboard-tab ${dashboardState.tab === 'top' ? 'active' : ''}" onclick="switchDashboardTab('top')">
+        <div class="issues-toolbar">
+            <div class="issues-tabs">
+                <button class="issues-tab ${issuesState.tab === 'top' ? 'active' : ''}" onclick="switchIssuesTab('top')">
                     🔥 Top Issues
                 </button>
-                <button class="dashboard-tab ${dashboardState.tab === 'starred' ? 'active' : ''}" onclick="switchDashboardTab('starred')">
+                <button class="issues-tab ${issuesState.tab === 'starred' ? 'active' : ''}" onclick="switchIssuesTab('starred')">
                     ⭐ Starred <span class="tab-count">${starredCount}</span>
                 </button>
             </div>
-            <div class="dashboard-actions">
-                ${dashboardState.tab === 'top' ? `
+            <div class="issues-actions">
+                ${issuesState.tab === 'top' ? `
                     <div class="days-toggle">
-                        <button class="days-toggle-btn ${dashboardState.days === 3 ? 'active' : ''}" onclick="switchDashboardDays(3)">3 天</button>
-                        <button class="days-toggle-btn ${dashboardState.days === 7 ? 'active' : ''}" onclick="switchDashboardDays(7)">7 天</button>
+                        <button class="days-toggle-btn ${issuesState.days === 3 ? 'active' : ''}" onclick="switchIssuesDays(3)">3 天</button>
+                        <button class="days-toggle-btn ${issuesState.days === 7 ? 'active' : ''}" onclick="switchIssuesDays(7)">7 天</button>
                     </div>
                     <button class="btn btn-secondary btn-sm" id="batchSummaryBtn" onclick="batchAISummary()">
                         🤖 Batch Summary
                     </button>
-                    <button class="btn btn-secondary btn-sm" onclick="refreshDashboard()">
+                    <button class="btn btn-secondary btn-sm" onclick="refreshIssues()">
                         🔄 Refresh
                     </button>
                 ` : ''}
             </div>
         </div>`;
 
-    if (dashboardState.tab === 'top') {
-        const issues = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number));
+    if (issuesState.tab === 'top') {
+        const issues = issuesState.topIssues.filter(i => !issuesState.dismissed.has(i.number));
         if (issues.length === 0) {
             html += `<div class="empty-state">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48"><circle cx="12" cy="12" r="10"/><path d="M8 15h8M9 9h.01M15 9h.01"/></svg>
                 <p>No high-value issues found right now</p>
             </div>`;
         } else {
-            html += `<div class="issue-list">${issues.map(i => renderDashboardIssueCard(i)).join('')}</div>`;
+            html += `<div class="issue-list">${issues.map(i => renderIssuesIssueCard(i)).join('')}</div>`;
         }
     } else {
         // Starred tab
-        if (dashboardState.starredIssues.length > 0) {
-            html += `<div class="issue-list">${dashboardState.starredIssues.map(i => renderDashboardIssueCard(i, true)).join('')}</div>`;
+        if (issuesState.starredIssues.length > 0) {
+            html += `<div class="issue-list">${issuesState.starredIssues.map(i => renderIssuesIssueCard(i, true)).join('')}</div>`;
         } else if (starredCount > 0) {
             html += `<div class="loading"><div class="spinner"></div><span>Loading starred issues...</span></div>`;
         } else {
@@ -350,22 +355,22 @@ function renderDashboardContent() {
     bindIssueCardClicks();
 
     // If on starred tab and we need to fetch starred issue details
-    if (dashboardState.tab === 'starred' && starredCount > 0 && dashboardState.starredIssues.length === 0) {
+    if (issuesState.tab === 'starred' && starredCount > 0 && issuesState.starredIssues.length === 0) {
         loadStarredIssues();
     }
 }
 
-function renderDashboardIssueCard(issue, isStarredTab = false) {
+function renderIssuesIssueCard(issue, isStarredTab = false) {
     const labels = (issue.labels || []).map(l =>
         `<span class="label-badge" style="${labelStyle(l.color)}">${escapeHtml(l.name)}</span>`
     ).join('');
     const user = issue.user || {};
     const commentsCount = issue.comments || 0;
-    const isStarred = dashboardState.starredNumbers.includes(issue.number);
-    const summary = dashboardState.summaries[issue.number];
+    const isStarred = issuesState.starredNumbers.includes(issue.number);
+    const summary = issuesState.summaries[issue.number];
 
     return `
-        <div class="issue-card dashboard-issue-card" data-issue-number="${issue.number}">
+        <div class="issue-card issues-issue-card" data-issue-number="${issue.number}">
             <div class="issue-card-left">
                 ${issueStatusIcon(issue.state)}
                 <div class="issue-card-body">
@@ -409,70 +414,70 @@ function renderDashboardIssueCard(issue, isStarredTab = false) {
         </div>`;
 }
 
-async function switchDashboardTab(tab) {
-    dashboardState.tab = tab;
+async function switchIssuesTab(tab) {
+    issuesState.tab = tab;
     if (tab === 'starred') {
         // Reload starred data
-        dashboardState.starredIssues = [];
+        issuesState.starredIssues = [];
     }
-    renderDashboardContent();
+    renderIssuesContent();
 }
 
 async function loadStarredIssues() {
     try {
         const data = await API.getStarred();
-        dashboardState.starredIssues = data.items || [];
-        dashboardState.starredNumbers = data.starred || dashboardState.starredNumbers;
-        renderDashboardContent();
+        issuesState.starredIssues = data.items || [];
+        issuesState.starredNumbers = data.starred || issuesState.starredNumbers;
+        renderIssuesContent();
     } catch (err) {
         Toast.show('Failed to load starred issues', 'error');
     }
 }
 
 async function toggleStar(number) {
-    const isStarred = dashboardState.starredNumbers.includes(number);
+    const isStarred = issuesState.starredNumbers.includes(number);
     try {
         if (isStarred) {
             const result = await API.unstarIssue(number);
-            dashboardState.starredNumbers = result.starred || [];
-            dashboardState.starredIssues = dashboardState.starredIssues.filter(i => i.number !== number);
+            issuesState.starredNumbers = result.starred || [];
+            issuesState.starredIssues = issuesState.starredIssues.filter(i => i.number !== number);
             Toast.show(`Issue #${number} unstarred`, 'info');
         } else {
             const result = await API.starIssue(number);
-            dashboardState.starredNumbers = result.starred || [];
+            issuesState.starredNumbers = result.starred || [];
             Toast.show(`Issue #${number} starred ⭐`, 'success');
         }
-        renderDashboardContent();
+        renderIssuesContent();
     } catch (err) {
         Toast.show('Failed to update star', 'error');
     }
 }
 
 function dismissIssue(number) {
-    dashboardState.dismissed.add(number);
+    issuesState.dismissed.add(number);
     // Animate the card out
     const card = document.querySelector(`.issue-card[data-issue-number="${number}"]`);
     if (card) {
         card.classList.add('issue-card-dismissed');
-        setTimeout(() => renderDashboardContent(), 300);
+        setTimeout(() => renderIssuesContent(), 300);
     } else {
-        renderDashboardContent();
+        renderIssuesContent();
     }
     Toast.show(`Issue #${number} dismissed`, 'info');
 }
 
-async function refreshDashboard() {
-    dashboardState.dismissed.clear();
-    dashboardState.summaries = {};
-    await renderDashboard();
+async function refreshIssues() {
+    issuesState.dismissed.clear();
+    issuesState.summaries = {};
+    await renderIssues();
 }
 
-async function switchDashboardDays(days) {
-    if (dashboardState.days === days) return;
-    dashboardState.days = days;
-    dashboardState.dismissed.clear();
-    dashboardState.summaries = {};
-    await renderDashboard();
+async function switchIssuesDays(days) {
+    if (issuesState.days === days) return;
+    issuesState.days = days;
+    issuesState.dismissed.clear();
+    issuesState.summaries = {};
+    await renderIssues();
 }
 
 async function batchAISummary() {
@@ -481,14 +486,14 @@ async function batchAISummary() {
     btn.disabled = true;
     btn.textContent = '⏳ Summarizing...';
 
-    const issues = dashboardState.topIssues.filter(i => !dashboardState.dismissed.has(i.number));
+    const issues = issuesState.topIssues.filter(i => !issuesState.dismissed.has(i.number));
     let completed = 0;
     const total = issues.length;
 
     // Create or get the progress indicator below the toolbar
     let progressEl = document.getElementById('batchProgressIndicator');
     if (!progressEl) {
-        const toolbar = document.querySelector('.dashboard-toolbar');
+        const toolbar = document.querySelector('.issues-toolbar');
         if (toolbar) {
             progressEl = document.createElement('div');
             progressEl.id = 'batchProgressIndicator';
@@ -517,7 +522,7 @@ async function batchAISummary() {
     }
 
     for (const issue of issues) {
-        if (dashboardState.summaries[issue.number]) {
+        if (issuesState.summaries[issue.number]) {
             completed++;
             continue; // Skip already summarized
         }
@@ -534,20 +539,20 @@ async function batchAISummary() {
                 labels: (issue.labels || []).map(l => l.name),
                 comments: [], // Skip comments for batch summary to save time
             });
-            dashboardState.summaries[issue.number] = result.summary || '';
+            issuesState.summaries[issue.number] = result.summary || '';
             completed++;
             btn.textContent = `⏳ ${completed}/${total}`;
             // Update the card in-place
             const summaryEl = document.querySelector(`.issue-card[data-issue-number="${issue.number}"] .issue-card-summary`);
             if (summaryEl) {
-                summaryEl.innerHTML = renderMarkdown(dashboardState.summaries[issue.number]);
+                summaryEl.innerHTML = renderMarkdown(issuesState.summaries[issue.number]);
             } else {
                 // Add summary element
                 const bodyEl = document.querySelector(`.issue-card[data-issue-number="${issue.number}"] .issue-card-body`);
                 if (bodyEl) {
                     const div = document.createElement('div');
                     div.className = 'issue-card-summary';
-                    div.innerHTML = renderMarkdown(dashboardState.summaries[issue.number]);
+                    div.innerHTML = renderMarkdown(issuesState.summaries[issue.number]);
                     bodyEl.appendChild(div);
                 }
             }
@@ -571,118 +576,217 @@ async function batchAISummary() {
 }
 
 // ============================================================================
-// Issues Page
+// Discussion Page
 // ============================================================================
-let issuesState = { page: 1, state: 'open', sort: 'updated', direction: 'desc', since: '', labels: '', q: '' };
+let discussionState = {
+    days: '3',             // default time range filter
+    sort: 'updated',
+    direction: 'desc',
+    category: '',          // category id filter
+    categories: [],        // available categories (populated from API)
+    cursors: [null],       // cursor stack for pagination
+    currentPage: 1,
+    hasNextPage: false,
+};
 
-async function renderIssuesPage() {
+async function renderDiscussionPage() {
     showLoading();
-    // Load labels once
-    if (State.labels.length === 0) {
-        try { State.labels = await API.getLabels(); } catch { /* ignore */ }
-    }
-    await fetchAndRenderIssues();
+    await fetchAndRenderDiscussion();
 }
 
-async function fetchAndRenderIssues() {
+async function fetchAndRenderDiscussion() {
     const params = {
-        state: issuesState.state,
-        sort: issuesState.sort,
-        direction: issuesState.direction,
-        page: issuesState.page,
+        sort: discussionState.sort,
+        direction: discussionState.direction,
         per_page: 20,
     };
-    if (issuesState.since) params.since = sinceDate(parseInt(issuesState.since));
-    if (issuesState.labels) params.labels = issuesState.labels;
-    if (issuesState.q) params.q = issuesState.q;
+    if (discussionState.days) params.days = discussionState.days;
+    if (discussionState.category) params.category = discussionState.category;
+    // Use cursor for pagination
+    const cursor = discussionState.cursors[discussionState.currentPage - 1];
+    if (cursor) params.after = cursor;
 
     let html = `
         <div class="page-header">
-            <h1 class="page-title">Issues</h1>
+            <h1 class="page-title">Discussion</h1>
             <p class="page-subtitle">${escapeHtml(State.currentRepo)}</p>
         </div>
 
         <div class="filter-bar">
             <div class="filter-group">
-                <label class="filter-label">Status:</label>
-                <select class="filter-select" id="filterState" onchange="onFilterChange()">
-                    <option value="open" ${issuesState.state === 'open' ? 'selected' : ''}>Open</option>
-                    <option value="closed" ${issuesState.state === 'closed' ? 'selected' : ''}>Closed</option>
-                    <option value="all" ${issuesState.state === 'all' ? 'selected' : ''}>All</option>
-                </select>
-            </div>
-            <div class="filter-group">
                 <label class="filter-label">Updated:</label>
-                <select class="filter-select" id="filterSince" onchange="onFilterChange()">
-                    <option value="" ${!issuesState.since ? 'selected' : ''}>Any time</option>
-                    <option value="1" ${issuesState.since === '1' ? 'selected' : ''}>Last 24h</option>
-                    <option value="3" ${issuesState.since === '3' ? 'selected' : ''}>Last 3 days</option>
-                    <option value="7" ${issuesState.since === '7' ? 'selected' : ''}>Last 7 days</option>
-                    <option value="30" ${issuesState.since === '30' ? 'selected' : ''}>Last 30 days</option>
+                <select class="filter-select" id="filterDiscDays" onchange="onDiscussionFilterChange()">
+                    <option value="1" ${discussionState.days === '1' ? 'selected' : ''}>Last 24h</option>
+                    <option value="3" ${discussionState.days === '3' ? 'selected' : ''}>Last 3 days</option>
+                    <option value="7" ${discussionState.days === '7' ? 'selected' : ''}>Last 7 days</option>
+                    <option value="30" ${discussionState.days === '30' ? 'selected' : ''}>Last 30 days</option>
+                    <option value="" ${!discussionState.days ? 'selected' : ''}>Any time</option>
                 </select>
             </div>
             <div class="filter-group">
                 <label class="filter-label">Sort:</label>
-                <select class="filter-select" id="filterSort" onchange="onFilterChange()">
-                    <option value="updated" ${issuesState.sort === 'updated' ? 'selected' : ''}>Updated</option>
-                    <option value="created" ${issuesState.sort === 'created' ? 'selected' : ''}>Created</option>
-                    <option value="comments" ${issuesState.sort === 'comments' ? 'selected' : ''}>Comments</option>
+                <select class="filter-select" id="filterDiscSort" onchange="onDiscussionFilterChange()">
+                    <option value="updated" ${discussionState.sort === 'updated' ? 'selected' : ''}>Updated</option>
+                    <option value="created" ${discussionState.sort === 'created' ? 'selected' : ''}>Created</option>
                 </select>
             </div>
-            <div class="search-box">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                </svg>
-                <input type="text" id="searchInput" placeholder="Search issues..." value="${escapeHtml(issuesState.q)}" onkeydown="if(event.key==='Enter')onSearchSubmit()">
+            <div class="filter-group">
+                <label class="filter-label">Category:</label>
+                <select class="filter-select" id="filterDiscCategory" onchange="onDiscussionFilterChange()">
+                    <option value="">All</option>
+                    ${discussionState.categories.map(c =>
+        `<option value="${c.id}" ${discussionState.category === c.id ? 'selected' : ''}>${c.emoji || ''} ${escapeHtml(c.name)}</option>`
+    ).join('')}
+                </select>
             </div>
         </div>`;
 
     try {
-        const data = await API.getIssues(params);
-        const issues = data.items || [];
-        if (issues.length === 0) {
+        const data = await API.getDiscussions(params);
+
+        if (data.error) {
             html += `<div class="empty-state">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48"><circle cx="12" cy="12" r="10"/><path d="M8 15h8M9 9h.01M15 9h.01"/></svg>
-                <p>No issues found</p>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <p>Failed to load discussions</p>
+                <p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-top:var(--space-2);word-break:break-all;">Error: ${escapeHtml(data.error)}</p>
+                <a href="#settings" class="btn btn-primary">Go to Settings</a>
+            </div>`;
+            setContent(html);
+            return;
+        }
+
+        const discussions = data.items || [];
+        const pageInfo = data.page_info || {};
+        discussionState.hasNextPage = pageInfo.has_next_page || false;
+
+        // Update categories from API response
+        if (data.categories && data.categories.length > 0) {
+            discussionState.categories = data.categories;
+            // Re-render category dropdown
+            const catSelect = `<option value="">All</option>${discussionState.categories.map(c =>
+                `<option value="${c.id}" ${discussionState.category === c.id ? 'selected' : ''}>${c.emoji || ''} ${escapeHtml(c.name)}</option>`
+            ).join('')}`;
+            // We'll update the select after setContent
+        }
+
+        // Store cursor for next page
+        if (pageInfo.end_cursor) {
+            discussionState.cursors[discussionState.currentPage] = pageInfo.end_cursor;
+        }
+
+        // Total count
+        const totalCount = data.total_count || 0;
+        html += `<p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-bottom:var(--space-4)">${discussions.length} discussion${discussions.length !== 1 ? 's' : ''} shown (${totalCount} total)</p>`;
+
+        if (discussions.length === 0) {
+            html += `<div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                <p>No discussions found for this filter</p>
             </div>`;
         } else {
-            html += `<div class="issue-list">${issues.map(renderIssueCard).join('')}</div>`;
+            html += `<div class="issue-list">${discussions.map(renderDiscussionCard).join('')}</div>`;
         }
 
         // Pagination
-        const pagination = data.pagination || {};
         html += `<div class="pagination">
-            <button class="btn btn-secondary btn-sm" ${!pagination.prev ? 'disabled' : ''} onclick="onPageChange(${issuesState.page - 1})">← Previous</button>
-            <span class="page-info">Page ${issuesState.page}</span>
-            <button class="btn btn-secondary btn-sm" ${!pagination.next ? 'disabled' : ''} onclick="onPageChange(${issuesState.page + 1})">Next →</button>
+            <button class="btn btn-secondary btn-sm" ${discussionState.currentPage <= 1 ? 'disabled' : ''} onclick="onDiscussionPageChange('prev')">← Previous</button>
+            <span class="page-info">Page ${discussionState.currentPage}</span>
+            <button class="btn btn-secondary btn-sm" ${!discussionState.hasNextPage ? 'disabled' : ''} onclick="onDiscussionPageChange('next')">Next →</button>
         </div>`;
 
         setContent(html);
-        bindIssueCardClicks();
+
+        // Update category dropdown if categories were loaded
+        if (data.categories && data.categories.length > 0) {
+            const catSelectEl = document.getElementById('filterDiscCategory');
+            if (catSelectEl) {
+                catSelectEl.innerHTML = `<option value="">All</option>${discussionState.categories.map(c =>
+                    `<option value="${c.id}" ${discussionState.category === c.id ? 'selected' : ''}>${c.emoji || ''} ${escapeHtml(c.name)}</option>`
+                ).join('')}`;
+            }
+        }
+
+        // Bind click to open discussion in new tab
+        document.querySelectorAll('.discussion-card').forEach(card => {
+            card.addEventListener('click', () => {
+                const url = card.dataset.url;
+                if (url) window.open(url, '_blank');
+            });
+        });
     } catch (err) {
-        html += `<div class="empty-state"><p>Failed to load issues</p></div>`;
+        html += `<div class="empty-state"><p>Failed to load discussions</p>
+            <p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-top:var(--space-2);">${escapeHtml(err.message || String(err))}</p>
+        </div>`;
         setContent(html);
     }
 }
 
-function onFilterChange() {
-    issuesState.state = document.getElementById('filterState').value;
-    issuesState.since = document.getElementById('filterSince').value;
-    issuesState.sort = document.getElementById('filterSort').value;
-    issuesState.page = 1;
-    fetchAndRenderIssues();
+function renderDiscussionCard(disc) {
+    const labels = (disc.labels || []).map(l =>
+        `<span class="label-badge" style="${labelStyle(l.color)}">${escapeHtml(l.name)}</span>`
+    ).join('');
+
+    const user = disc.user || {};
+    const category = disc.category || {};
+    const commentsCount = disc.comments || 0;
+    const isAnswered = disc.is_answered;
+
+    return `
+        <div class="issue-card discussion-card" data-url="${escapeHtml(disc.html_url || '')}" style="cursor:pointer;animation-delay:${Math.random() * 0.1}s">
+            <div class="discussion-status-icon ${isAnswered ? 'answered' : 'unanswered'}">
+                ${isAnswered
+            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`
+        }
+            </div>
+            <div class="issue-card-body">
+                <div class="issue-card-title">
+                    <span>${escapeHtml(disc.title)}</span>
+                    <span class="issue-number">#${disc.number}</span>
+                </div>
+                <div class="issue-card-meta">
+                    <span class="author">
+                        <img src="${user.avatar_url || ''}" alt="" loading="lazy">
+                        ${escapeHtml(user.login || 'unknown')}
+                    </span>
+                    ${category.name ? `<span class="discussion-category">${category.emoji || '💬'} ${escapeHtml(category.name)}</span>` : ''}
+                    <span>updated ${timeAgo(disc.updated_at)}</span>
+                    <span>opened ${timeAgo(disc.created_at)}</span>
+                </div>
+                ${labels ? `<div class="issue-card-labels">${labels}</div>` : ''}
+                ${isAnswered ? `<span class="discussion-answered-badge">✅ Answered</span>` : ''}
+            </div>
+            ${commentsCount > 0 ? `
+                <div class="comment-count">
+                    <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+                        <path d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h4.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/>
+                    </svg>
+                    ${commentsCount}
+                </div>
+            ` : ''}
+        </div>`;
 }
 
-function onSearchSubmit() {
-    issuesState.q = document.getElementById('searchInput').value.trim();
-    issuesState.page = 1;
-    fetchAndRenderIssues();
+function onDiscussionFilterChange() {
+    discussionState.days = document.getElementById('filterDiscDays').value;
+    discussionState.sort = document.getElementById('filterDiscSort').value;
+    const catSelect = document.getElementById('filterDiscCategory');
+    discussionState.category = catSelect ? catSelect.value : '';
+    // Reset pagination
+    discussionState.cursors = [null];
+    discussionState.currentPage = 1;
+    fetchAndRenderDiscussion();
 }
 
-function onPageChange(page) {
-    if (page < 1) return;
-    issuesState.page = page;
-    fetchAndRenderIssues();
+function onDiscussionPageChange(dir) {
+    if (dir === 'next' && discussionState.hasNextPage) {
+        discussionState.currentPage++;
+    } else if (dir === 'prev' && discussionState.currentPage > 1) {
+        discussionState.currentPage--;
+    }
+    fetchAndRenderDiscussion();
 }
 
 // ============================================================================
@@ -1509,8 +1613,8 @@ async function initApp() {
     await State.loadSettings();
 
     // Register routes
-    Router.register('dashboard', renderDashboard);
-    Router.register('issues', renderIssuesPage);
+    Router.register('issues', renderIssues);
+    Router.register('discussion', renderDiscussionPage);
     Router.register('my-issues', renderMyIssuesPage);
     Router.register('settings', renderSettingsPage);
 

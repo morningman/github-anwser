@@ -372,7 +372,7 @@ textarea {
 }
 
 /* ========================================================================
-   Statistics Cards (Dashboard)
+   Statistics Cards (Issues)
    ======================================================================== */
 .stats-grid {
     display: grid;
@@ -1642,9 +1642,9 @@ textarea {
 }
 
 /* ========================================================================
-   Dashboard — Stats Bar, Tabs, Actions
+   Issues — Stats Bar, Tabs, Actions
    ======================================================================== */
-.dashboard-stats-bar {
+.issues-stats-bar {
     display: flex;
     gap: var(--space-6);
     margin-bottom: var(--space-6);
@@ -1672,7 +1672,7 @@ textarea {
     color: var(--text-secondary);
 }
 
-.dashboard-toolbar {
+.issues-toolbar {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1681,12 +1681,12 @@ textarea {
     gap: var(--space-3);
 }
 
-.dashboard-tabs {
+.issues-tabs {
     display: flex;
     gap: var(--space-1);
 }
 
-.dashboard-tab {
+.issues-tab {
     padding: var(--space-2) var(--space-4);
     font-size: var(--font-size-sm);
     font-weight: 500;
@@ -1701,19 +1701,19 @@ textarea {
     gap: var(--space-2);
 }
 
-.dashboard-tab:hover {
+.issues-tab:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
 }
 
-.dashboard-tab.active {
+.issues-tab.active {
     color: var(--text-primary);
     background: var(--bg-active);
     border-color: var(--accent-purple);
     box-shadow: var(--tab-active-shadow);
 }
 
-.dashboard-tab .tab-count {
+.issues-tab .tab-count {
     background: var(--bg-primary);
     padding: 0 6px;
     border-radius: var(--radius-full);
@@ -1723,7 +1723,7 @@ textarea {
     text-align: center;
 }
 
-.dashboard-actions {
+.issues-actions {
     display: flex;
     gap: var(--space-2);
     align-items: center;
@@ -1772,22 +1772,22 @@ textarea {
 }
 
 /* ========================================================================
-   Dashboard Issue Card (extended)
+   Issues Issue Card (extended)
    ======================================================================== */
-.dashboard-issue-card {
+.issues-issue-card {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
 }
 
-.dashboard-issue-card .issue-card-left {
+.issues-issue-card .issue-card-left {
     display: flex;
     gap: var(--space-3);
     flex: 1;
     min-width: 0;
 }
 
-.dashboard-issue-card .issue-card-actions {
+.issues-issue-card .issue-card-actions {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -1832,7 +1832,7 @@ textarea {
     opacity: 0;
 }
 
-.dashboard-issue-card:hover .dismiss-btn {
+.issues-issue-card:hover .dismiss-btn {
     opacity: 1;
 }
 
@@ -2135,6 +2135,59 @@ textarea {
         margin: 0;
         overflow: hidden;
     }
+}
+
+/* ========================================================================
+   Discussion Card Styles
+   ======================================================================== */
+.discussion-card {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+}
+
+.discussion-status-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 2px;
+}
+
+.discussion-status-icon.answered {
+    color: var(--accent-green);
+}
+
+.discussion-status-icon.unanswered {
+    color: var(--accent-purple);
+}
+
+.discussion-category {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.discussion-answered-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--test-success-bg);
+    border: 1px solid var(--accent-green);
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-green);
+    margin-top: var(--space-1);
 }
 
 /* ========================================================================
